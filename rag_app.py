@@ -6,37 +6,31 @@ from langchain.embeddings import HuggingFaceBgeEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain.chains import ConversationalRetrievalChain
 from langchain.schema import Document
-import requests
-from bs4 import BeautifulSoup
-from scrapegraphai.graphs import SmartScraperGraph
-import asyncio
-from functools import partial
-import sys
-from crawl4ai import AsyncWebCrawler, CacheMode, CrawlerRunConfig
-from langchain_community.document_loaders import TextLoader
-
 import chromadb
 from chromadb.config import Settings
-import os
-chroma_setting = Settings(anonymized_telemetry=False)
-persist_directory = "chroma_db"
-collection_metadata = {"hnsw:space": "cosine"}
-client = chromadb.PersistentClient(path=persist_directory, settings=chroma_setting)
-# Set Windows event loop policy
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-
-# Apply nest_asyncio to allow nested event loops
-import nest_asyncio  # Import nest_asyncio module for asynchronous operations
-nest_asyncio.apply()  # Apply nest_asyncio to resolve any issues with asyncio event loop
+import nest_asyncio
+import sys
+import asyncio
 
 # Load environment variables
 load_dotenv()
-print(os.getenv("GROQ_API_KEY"))
+print("[INFO] Loaded environment variables.")
+
+# Set Windows event loop policy
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+nest_asyncio.apply()
+
+# ChromaDB settings
+persist_directory = "chroma_db"
+chroma_setting = Settings(anonymized_telemetry=False)
+client = chromadb.PersistentClient(path=persist_directory, settings=chroma_setting)
 
 class WebRAG:
     def __init__(self):
-        # Initialize Groq
+        print("[INIT] Initializing WebRAG...")
+
+        # LLMs
         self.llm = ChatGroq(
             api_key=os.getenv("GROQ_API_KEY"),
             model_name="mixtral-8x7b-32768"
@@ -47,64 +41,62 @@ class WebRAG:
             temperature=0.6,
             max_tokens=2048,
         )
-        # Initialize embeddings
+
+        # Embeddings
         model_kwargs = {"device": "cpu"}
         encode_kwargs = {"normalize_embeddings": True}
-        
         self.embeddings = HuggingFaceBgeEmbeddings(
             model_name="BAAI/bge-base-en-v1.5",
             model_kwargs=model_kwargs,
             encode_kwargs=encode_kwargs
         )
-        
-        # Initialize text splitter
+
+        # Text Splitter
         self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200
+            chunk_size=500,          # Reduced chunk size for more granularity
+            chunk_overlap=100
         )
-        
-        self.vector_store =  Chroma(embedding_function= self.embeddings,
-                        client = client,
-                    persist_directory=persist_directory,
-                    client_settings=chroma_setting,
-                    )
-        self.qa_chain = None # Initialize QA chain as None
+
+        self.vector_store = Chroma(
+            embedding_function=self.embeddings,
+            client=client,
+            persist_directory=persist_directory,
+            client_settings=chroma_setting
+        )
+
+        self.qa_chain = None
+        print("[INIT] WebRAG initialized successfully.")
 
     def process_scraped_text(self, text_content):
-        """Processes the combined text content from web search results."""
+        """Processes raw text from web scraping into vector embeddings and builds the QA chain."""
         try:
             if not text_content:
                 raise ValueError("No text content provided for processing.")
 
-            # Clean the content (optional, but good practice)
+            print("[PROCESS] Length of scraped text:", len(text_content))
+
             text_content = text_content.encode('utf-8', errors='ignore').decode('utf-8')
 
-            # Create a single Document object with the combined text
-            # Using a generic source identifier
             doc = Document(page_content=text_content, metadata={"source": "web_search"})
-
-            # Split the document into chunks
             chunks = self.text_splitter.split_documents([doc])
-            print(f"Created {len(chunks)} chunks from web search text.")
+
+            print(f"[PROCESS] ✅ Created {len(chunks)} chunks from web search text.")
 
             if not chunks:
                 raise ValueError("Text content could not be split into chunks.")
 
-            # Add new documents to the vector store
-            # Note: This adds to the existing store. Consider clearing old 'web_search' data if needed.
+            # Store chunks in ChromaDB in batches
             MAX_BATCH_SIZE = 100
             for i in range(0, len(chunks), MAX_BATCH_SIZE):
                 i_end = min(len(chunks), i + MAX_BATCH_SIZE)
                 batch = chunks[i:i_end]
                 self.vector_store.add_documents(batch)
-                print(f"Stored vectors for batch {i} to {i_end} from web search.")
+                print(f"[VECTOR] 📦 Stored vectors for batch {i} to {i_end} (Total: {len(batch)})")
 
-            # Create QA chain using a retriever for the whole store (or filter for 'web_search' if preferred)
-            # Retriever fetches top 5 relevant chunks from the entire vector store
+            # Build the QA chain with top-k retriever
             retriever = self.vector_store.as_retriever(
                 search_type="similarity",
-                search_kwargs={"k": 5} # Fetch top 5 most similar chunks
-                # Optionally add filter: , "filter": {"source": "web_search"}
+                search_kwargs={"k": 5}
             )
 
             self.qa_chain = ConversationalRetrievalChain.from_llm(
@@ -112,285 +104,63 @@ class WebRAG:
                 retriever=retriever,
                 return_source_documents=True
             )
-            print("QA chain created successfully using web search content.")
+            print("[CHAIN] ✅ QA chain created successfully.")
 
         except Exception as e:
-            # Log the error or handle it appropriately
-            print(f"Error processing scraped text: {str(e)}")
-            # Re-raise the exception to be caught by the Streamlit app
+            print(f"[ERROR] Error processing scraped text: {str(e)}")
             raise Exception(f"Error processing scraped text: {str(e)}")
 
-
-    # --- Methods below are no longer directly used by the Streamlit app ---
-    # --- but kept for potential standalone use or reference ---
-
-    # def crawl_webpage_bs4(self, url):
-    #     """Crawl webpage using BeautifulSoup"""
-    #     headers = {
-    #         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    #     }
-    #     response = requests.get(url, headers=headers)
-    #     response.raise_for_status()
-        
-    #     soup = BeautifulSoup(response.text, 'html.parser')
-        
-    #     # Remove script and style elements
-    #     for script in soup(["script", "style"]):
-    #         script.decompose()
-            
-    #     # Get text content from relevant tags
-    #     text_elements = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'div'])
-    #     content = ' '.join([elem.get_text(strip=True) for elem in text_elements])
-        
-    #     # Clean up whitespace
-    #     content = ' '.join(content.split())
-    #     return content
-
-    # # Crawl4ai
-    # async def crawl_webpage_crawl4ai_async(self, url):
-    #     """Crawl webpage using Crawl4ai asynchronously"""
-    #     try:
-    #         crawler_run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
-    #         async with AsyncWebCrawler() as crawler:
-    #             result = await crawler.arun(url=url, config=crawler_run_config)
-    #             return result.markdown
-    #     except Exception as e:
-    #         raise Exception(f"Error in Crawl4ai async: {str(e)}")
-
-    # def crawl_webpage_crawl4ai(self, url):
-    #     """Synchronous wrapper for crawl4ai"""
-    #     try:
-    #         loop = asyncio.get_event_loop()
-    #     except RuntimeError:
-    #         loop = asyncio.new_event_loop()
-    #         asyncio.set_event_loop(loop)
-            
-    #     try:
-    #         return loop.run_until_complete(self.crawl_webpage_crawl4ai_async(url))
-    #     except Exception as e:
-    #         raise Exception(f"Error in Crawl4ai: {str(e)}")
-
-    # def crawl_webpage_scrapegraph(self, url):
-    #     """Crawl webpage using ScrapeGraphAI"""
-    #     try:
-    #         # First try with Groq
-    #         graph_config = {
-    #             "llm": {
-    #                 "api_key": os.getenv("GROQ_API_KEY"),
-    #                 "model": "groq/mixtral-8x7b-32768",
-    #             },
-    #             "verbose": True,
-    #             "headless": True,
-    #             "disable_async": True  # Use synchronous mode
-    #         }
-            
-    #         scraper = SmartScraperGraph(
-    #             prompt="Extract all the useful textual content from the webpage",
-    #             source=url,
-    #             config=graph_config
-    #         )
-            
-    #         # Use synchronous run
-    #         result = scraper.run()
-    #         print("Groq scraping successful")
-    #         return str(result)
-            
-    #     except Exception as e:
-    #         print(f"Groq scraping failed, falling back to Ollama: {str(e)}")
-    #         try:
-    #             # Fallback to Ollama
-    #             graph_config = {
-    #                 "llm": {
-    #                     "model": "ollama/deepseek-r1:8b",
-    #                     "temperature": 0,
-    #                     "max_tokens": 2048,
-    #                     "format": "json",
-    #                     "base_url": "http://localhost:11434",
-    #                 },
-    #                 "embeddings": {
-    #                     "model": "ollama/nomic-embed-text",
-    #                     "base_url": "http://localhost:11434",
-    #                 },
-    #                 "verbose": True,
-    #                 "disable_async": True  # Use synchronous mode
-    #             }
-                
-    #             scraper = SmartScraperGraph(
-    #                 prompt="Extract all the useful textual content from the webpage",
-    #                 source=url,
-    #                 config=graph_config
-    #             )
-                
-    #             result = scraper.run()
-    #             print("Ollama scraping successful")
-    #             return str(result)
-                
-    #         except Exception as e2:
-    #             raise Exception(f"Both Groq and Ollama scraping failed: {str(e2)}")
-
-    # def crawl_and_process(self, url, scraping_method="beautifulsoup"):
-    #     """Crawl the URL and process the content"""
-    #     # THIS METHOD IS NO LONGER USED BY THE STREAMLIT APP
-    #     try:
-    #         # Validate URL
-    #         if not url.startswith(('http://', 'https://')):
-    #             raise ValueError("Invalid URL. Please include http:// or https://")
-            
-    #         # Crawl the website using selected method
-    #         if scraping_method == "beautifulsoup":
-    #             content = self.crawl_webpage_bs4(url)
-    #         elif scraping_method == "crawl4ai":
-    #             content = self.crawl_webpage_crawl4ai(url)
-    #         else:  # scrapegraph
-    #             content = self.crawl_webpage_scrapegraph(url)
-            
-    #         if not content:
-    #             raise ValueError("No content found at the specified URL")
-            
-    #         # Clean the content of any problematic characters
-    #         content = content.encode('utf-8', errors='ignore').decode('utf-8')
-            
-    #         # Create a temporary file with proper encoding
-    #         import tempfile
-    #         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', delete=False, suffix='.txt') as temp_file:
-    #             temp_file.write(content)
-    #             temp_path = temp_file.name
-            
-    #         try:
-    #             # Load and process the document
-    #             docs = TextLoader(temp_path, encoding='utf-8').load()
-    #             docs = [Document(page_content=doc.page_content, metadata={"source": url}) for doc in docs]
-    #             chunks = self.text_splitter.split_documents(docs)
-    #             print(f"Length of chunks: {len(chunks)}")
-    #             # print(f"First chunk: {chunks[0].metadata['source']}") # Causes error if chunks is empty
-                
-    #             # Check if path exists
-    #             # data_exists = False # Not used
-    #             existing_urls = []
-                
-    #             if os.path.exists("chroma_db"):
-    #                 # Check if the URL is already in the metadata
-    #                 print(f"Checking if URL {url} is already in the metadata")
-    #                 try:
-    #                     # self.vectorstore = Chroma(...) # Already initialized in __init__
-    #                     entities = self.vector_store.get(include=["metadatas"])
-    #                     print(f"Entities: {len(entities['metadatas'])}")
-    #                     if len(entities['metadatas']) > 0:
-    #                         for entry in entities['metadatas']:
-    #                             #print(f"Entry: {entry}")
-    #                             if "source" in entry: # Check if source key exists
-    #                                 existing_urls.append(entry["source"])
-    #                 except Exception as e:
-    #                     print(f"Error checking existing URLs: {str(e)}")
-    #             print(f"Existing URLs: {set(existing_urls)}")
-    #             if url in set(existing_urls):
-    #                 # data_exists = True # Not used
-    #                 print(f"URL {url} already exists in the vector store. Re-using existing data.")
-    #                 # Load the existing vector store - Already loaded in __init__
-    #             else:
-    #                 # Add new documents to the vector store
-    #                 MAX_BATCH_SIZE = 100
-    #                 for i in range(0,len(chunks),MAX_BATCH_SIZE):
-    #                     i_end = min(len(chunks),i+MAX_BATCH_SIZE)
-    #                     batch = chunks[i:i_end]
-    #                     self.vector_store.add_documents(batch)
-    #                     print(f"vectors for batch {i} to {i_end} stored successfully...")
-                    
-                
-    #             # Create QA chain - Filter by the specific URL processed
-    #             self.qa_chain = ConversationalRetrievalChain.from_llm(
-    #                 llm=self.response_llm,
-    #                 retriever=self.vector_store.as_retriever(search_type="similarity",
-    #                                                          search_kwargs={"k": 5,"filter":{"source": url}}),
-    #                 return_source_documents=True
-    #             )
-            
-    #         finally:
-    #             # Clean up the temporary file
-    #             try:
-    #                 os.unlink(temp_path)
-    #             except:
-    #                 pass
-                    
-    #     except Exception as e:
-    #         raise Exception(f"Error processing URL: {str(e)}")
-
     def ask_question(self, question, chat_history=[]):
-        """Ask a question about the processed content"""
+        """Handles user queries using the initialized QA chain."""
         try:
             if not self.qa_chain:
-                # Updated error message to reflect the new workflow
-                raise ValueError("Please perform a web search and process the content first using the sidebar.")
+                raise ValueError("No QA chain found. Please process content first.")
 
-            # Use the QA chain initialized by process_scraped_text
-            response = self.qa_chain.invoke({"question": question, "chat_history": chat_history[:4000]})
-            print(f"Response: {response}")
+            response = self.qa_chain.invoke({
+                "question": question,
+                "chat_history": chat_history[:4000]
+            })
 
-            # Extract the raw answer string
             raw_answer = response.get("answer", "Sorry, I couldn't generate an answer.")
-            final_answer = raw_answer # Default to raw answer
+            final_answer = raw_answer.strip()
 
-            # Refined extraction logic
-            if isinstance(raw_answer, str):
-                if "</think>" in raw_answer:
-                    # Split after the </think> tag (only once)
-                    parts = raw_answer.split("</think>", 1)
-                    if len(parts) > 1:
-                        # Take the part after </think> and strip leading/trailing whitespace
-                        final_answer = parts[1].strip()
-                    else:
-                        # Should not happen if </think> is present, but handle defensively
-                        final_answer = raw_answer.strip()
-                else:
-                    # If no think block, assume the raw answer is the final answer
-                    final_answer = raw_answer.strip()
-            else:
-                 # If answer is not a string, convert it
-                 final_answer = str(raw_answer)
+            # Extract better if </think> used in Groq responses
+            if isinstance(final_answer, str) and "</think>" in final_answer:
+                parts = final_answer.split("</think>", 1)
+                if len(parts) > 1:
+                    final_answer = parts[1].strip()
 
-            # Further clean up potential "Answer: " prefixes sometimes added by models
             if final_answer.startswith("Answer:"):
                 final_answer = final_answer[len("Answer:"):].strip()
 
-            return final_answer # Return the cleaned answer
+            print("[QA] Answer generated:", final_answer[:200], "...")
+            return final_answer
 
         except Exception as e:
-            raise Exception(f"Error generating response: {str(e)}")
+            raise Exception(f"[ERROR] Could not generate answer: {str(e)}")
 
+
+# Optional CLI testing
 def main():
-    # Initialize the RAG system
     rag = WebRAG()
+    print("[MAIN] CLI Demo - Start")
 
-    # --- This main function now demonstrates the OLD URL-based workflow ---
-    # --- It does NOT reflect the new web search functionality implemented for Streamlit ---
-    print("--- Running Standalone URL Processing Demo ---")
-    # Get URL from user
-    url = input("Enter the URL to process: ")
-    print("Processing URL... This may take a moment.")
-    # scraping_method = input("Choose scraping method (beautifulsoup or scrapegraph or crawl4ai): ")
-    # rag.crawl_and_process(url, scraping_method) # This method is commented out
+    # Placeholder for manual text input or scraping method
+    text = input("Paste some text or simulate a scraped result: ")
+    rag.process_scraped_text(text)
 
-    print("NOTE: The 'crawl_and_process' method used by this demo is currently commented out.")
-    print("To test the old workflow, uncomment 'crawl_and_process' and related methods.")
-
-    # Interactive Q&A loop (will likely fail as qa_chain is not initialized without crawl_and_process)
     chat_history = []
     while True:
-        question = input("\nEnter your question (or 'quit' to exit): ")
-        if question.lower() == 'quit':
+        question = input("\nYour question (type 'quit' to exit): ")
+        if question.lower() == "quit":
             break
-
         try:
             answer = rag.ask_question(question, chat_history)
             print("\nAnswer:", answer)
             chat_history.append((question, answer))
-        except ValueError as ve:
-             print(f"Error: {ve}") # Catch the specific error from ask_question
-             print("Exiting demo as processing step was skipped.")
-             break
         except Exception as e:
-             print(f"An unexpected error occurred: {e}")
-             break
+            print(str(e))
+            break
 
 
 if __name__ == "__main__":

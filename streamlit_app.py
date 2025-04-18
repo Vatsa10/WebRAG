@@ -57,12 +57,18 @@ if 'query_processed' not in st.session_state:
     st.session_state.query_processed = False
 if 'current_query' not in st.session_state:
     st.session_state.current_query = ""
+if 'scraped_urls' not in st.session_state:
+    st.session_state.scraped_urls = []
+if 'raw_results' not in st.session_state:
+    st.session_state.raw_results = ""
 
 # Function to reset chat history
 def reset_chat_history():
     st.session_state.chat_history = []
     st.session_state.current_query = ""
     st.session_state.query_processed = False # Reset processing status
+    st.session_state.scraped_urls = []
+    st.session_state.raw_results = ""
 
 # --- Web Search and Content Extraction Functions ---
 def search_web(query, api_key):
@@ -78,7 +84,7 @@ def search_web(query, api_key):
         response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
         search_results = response.json()
         # Extract URLs from organic results
-        urls = [result['link'] for result in search_results.get('organic', [])[:5]] # Get top 5 results
+        urls = [result['link'] for result in search_results.get('organic', [])[:10]] # Get top 5 results
         return urls
     except requests.exceptions.RequestException as e:
         st.error(f"Error during web search: {e}")
@@ -90,6 +96,7 @@ def search_web(query, api_key):
 def fetch_and_extract_text(urls):
     """Fetches content from URLs and extracts text using BeautifulSoup."""
     all_text = ""
+    scraped_urls = []
     for url in urls:
         try:
             response = requests.get(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'}) # Add User-Agent
@@ -100,12 +107,14 @@ def fetch_and_extract_text(urls):
             texts = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
             page_text = "\n".join([t.get_text() for t in texts])
             all_text += f"\n\n--- Content from {url} ---\n{page_text}"
+            scraped_urls.append(url)
             time.sleep(0.5) # Small delay between requests
         except requests.exceptions.RequestException as e:
             st.warning(f"Could not fetch {url}: {e}")
         except Exception as e:
             st.warning(f"Error processing {url}: {e}")
-    return all_text.strip()
+    
+    return all_text.strip(), scraped_urls
 # ----------------------------------------------------
 
 # Header
@@ -137,14 +146,15 @@ with st.sidebar:
                         else:
                             st.info(f"Found {len(urls)} relevant URLs. Fetching content...")
                             # 2. Fetch and extract text
-                            extracted_text = fetch_and_extract_text(urls)
+                            extracted_text, scraped_urls = fetch_and_extract_text(urls)
                             if not extracted_text:
                                 st.error("Could not extract any text content from the search results.")
                             else:
                                 st.info("Processing extracted text for RAG...")
-                                # 3. Process text with RAG (Requires changes in rag_app.py)
-                                # Placeholder for the new RAG processing method
-                                st.session_state.rag.process_scraped_text(extracted_text) # Assuming this method exists/will be created
+                                # 3. Process text with RAG
+                                st.session_state.rag.process_scraped_text(extracted_text)
+                                st.session_state.scraped_urls = scraped_urls
+                                st.session_state.raw_results = extracted_text
                                 st.session_state.query_processed = True
                                 st.success("Web content processed successfully!")
                                 st.rerun() # Refresh the interface
@@ -162,11 +172,18 @@ with st.sidebar:
     4. Ask questions based on the retrieved content
     """)
 
+# --- Show Scraped Details and Raw Results ---
+if st.session_state.query_processed:
+    st.subheader("Scraped URLs")
+    st.write(st.session_state.scraped_urls)
+
+    st.subheader("Raw Extracted Results")
+    st.text_area("Raw Results", st.session_state.raw_results, height=300)
+
 # Main chat interface
 st.divider()
 
 # Display chat messages
-# (No changes needed here)
 for message in st.session_state.chat_history:
     if message["role"] == "user":
         st.markdown(f"""
@@ -181,10 +198,9 @@ for message in st.session_state.chat_history:
         </div>
         """, unsafe_allow_html=True)
 
-
 # Chat input
-if st.session_state.query_processed: # Changed condition
-    question = st.chat_input("Ask a question about the search results...") # Changed placeholder
+if st.session_state.query_processed:
+    question = st.chat_input("Ask a question about the search results...")
     if question:
         # Add user message to chat history
         st.session_state.chat_history.append({"role": "user", "content": question})
@@ -192,29 +208,20 @@ if st.session_state.query_processed: # Changed condition
         # Get answer from RAG
         with st.spinner("Thinking..."):
             try:
-                # Format chat history for ConversationalRetrievalChain
-                # Expects list of tuples: [(human_msg1, ai_msg1), (human_msg2, ai_msg2), ...]
                 formatted_history = []
-                # Iterate through messages, pairing user questions with assistant answers
-                # Skip the last message if it's the user's current question
-                history_to_format = st.session_state.chat_history[:-1] # Exclude current question
+                history_to_format = st.session_state.chat_history[:-1]
                 for i in range(0, len(history_to_format), 2):
                     if i + 1 < len(history_to_format) and history_to_format[i]["role"] == "user" and history_to_format[i+1]["role"] == "assistant":
                         formatted_history.append((history_to_format[i]["content"], history_to_format[i+1]["content"]))
 
-                # Pass the correctly formatted history
-                answer = st.session_state.rag.ask_question(
-                    question,
-                    formatted_history
-                )
-                # Add assistant message to chat history
+                answer = st.session_state.rag.ask_question(question, formatted_history)
                 st.session_state.chat_history.append({"role": "assistant", "content": answer})
                 st.rerun()
             except Exception as e:
                 st.error(f"Error getting answer: {str(e)}")
 else:
-    st.info("👈 Please enter a query and click 'Search and Process' in the sidebar") # Changed message
+    st.info("👈 Please enter a query and click 'Search and Process' in the sidebar")
 
 # Footer
 st.divider()
-st.markdown("Built with Streamlit, LangChain, Groq, and Serper") # Updated footer
+st.markdown("Built by Vatsa Joshi")
