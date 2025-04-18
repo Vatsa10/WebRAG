@@ -4,8 +4,8 @@ An intelligent assistant that performs real-time **web search**, **scrapes infor
 
 Built with  using **Streamlit** and **LangChain**.
 
----
 
+---
 ## 🚀 Features
 
 - 🔎 Web search using Serper (Google-like results)
@@ -15,6 +15,8 @@ Built with  using **Streamlit** and **LangChain**.
 - 🧼 HTML content cleaning and parsing via BeautifulSoup
 - 🖥️ Interactive Streamlit UI
 
+---
+### Link to the Output Video: https://drive.google.com/file/d/11PBd-_af_s3qMMHzINCHCOnBJYwlRxQd/view?usp=sharing
 ---
 
 ## 🛠️ Installation & Setup
