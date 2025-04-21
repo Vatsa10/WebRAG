@@ -9,3 +9,4 @@ requests
 scrapegraphai
 nest_asyncio 
 crawl4ai
+sentence-transformers
